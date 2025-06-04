@@ -1,0 +1,22 @@
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+
+# Logs
+logs/
+*.log
+
+# Coverage directory
+coverage/
+
+# VS Code settings
+.vscode/
+
+# Production build
+dist/
+build/
+
+# Package lock json
+package-lock.json
