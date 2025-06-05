@@ -4,6 +4,24 @@ const validateId = (id) => joi.string().regex(/^[a-zA-Z0-9]+$/)
   .required()
   .validate(id);
 
+const validateBookingDetails = (bookingDetails) => joi.object({
+  passengerName: joi.string().required(),
+  flightNumber: joi.string().required(),
+  departure: joi.string().required(), // Airport code
+  arrival: joi.string().required(),   // Airport code
+  departureTime: joi.date().iso().required(),
+  arrivalTime: joi.date().iso().required(),
+  year: joi.number().integer().required(),
+  month: joi.number().integer().min(1).max(12).required(),
+  day: joi.number().integer().min(1).max(31).required(),
+  dayOfWeek: joi.number().integer().min(1).max(7).required(),
+  tailNum: joi.string().required(),
+  distance: joi.number().required(),
+  uniqueCarrier: joi.string().required(),
+  passengerEmail: joi.string().email().required()
+}).validate(bookingDetails);
+
 module.exports = {
-  validateId
+  validateId,
+  validateBookingDetails
 };

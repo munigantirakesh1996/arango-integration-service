@@ -60,6 +60,19 @@ const insertFlights = (flights) => ({
   bindVars: { flights }
 });
 
+const fetchFlightDetails = (filterParams) => ({
+  query: `
+    FOR flight IN flights
+      FILTER flight.PassEmail == @filterParams.passengerEmail
+      AND flight._from == CONCAT('airports/', @filterParams.departure)
+      AND flight._to == CONCAT('airports/', @filterParams.arrival)
+      AND flight.DepTimeUTC == @filterParams.departureTime
+      AND flight.ArrTimeUTC == @filterParams.arrivalTime
+     RETURN flight
+  `,
+  bindVars: { filterParams }
+});
+
 // EXPORTs
 module.exports = {
   insertFlight,
@@ -67,6 +80,7 @@ module.exports = {
   getAllFlights,
   updateFlight,
   deleteFlight,
-  insertFlights
+  insertFlights,
+  fetchFlightDetails
 };
 
