@@ -1,4 +1,4 @@
-const adapters = require('../adapters/index');
+const sqlAdapter = require('../adapters/sqlAdapter');
 const { processInBatches } = require('../utils/batchProcessor');
 const { Database } = require('arangojs');
 const config = require('../config');
@@ -6,8 +6,8 @@ const { system } = config.arango;
 const { logger } = require('../middlewares/loggerMiddleware');
 const { sourceTypes } = require('../utils/constants');
 
-const validateSourceType = (sourceType, adapter) => {
-  if (!sourceTypes.includes(sourceType) || !adapter) {
+const validateSourceType = (sourceType) => {
+  if (!sourceTypes.includes(sourceType)) {
     logger.log({
       level: 'error',
       message: 'migrationService - validateSourceType - error',
@@ -58,21 +58,25 @@ const ensureDatabaseExists = async (sysDb, sourceConfig) => {
   });
 };
 
-const migrate = async ({ sourceType, sourceConfig }) => {
+const migrate = async (sourceDetails) => {
   let conn;
   try {
-    const adapter = adapters[sourceType];
-    /* Validate the source type and adapter */
-    validateSourceType(sourceType, adapter);
-    conn = await adapter.connect(sourceConfig);
+    const { sourceType, sourceConfig } = sourceDetails;
+    const { database, schema } = sourceConfig;
+    /* Validate the source type */
+    validateSourceType(sourceType);
+
+    conn = await sqlAdapter.connect(sourceDetails);
+
     /* Log the Source db details */
     const { tableNames, primaryKeys, foreignKeys, indexes } =
-      await adapter.fetchMetadata(conn, sourceConfig.database);
+      await sqlAdapter.fetchMetadata(conn, database, schema, sourceType);
     logger.log({
       level: 'info',
       message: 'migrationService - migrate - metadata fetched',
       meta: { tableNames, primaryKeys, foreignKeys, indexes }
     });
+
     /* Create a connection to the system database in ArangoDB
      * This is usually "_system" database where we can create new databases */
     const sysDb = new Database({
@@ -85,6 +89,7 @@ const migrate = async ({ sourceType, sourceConfig }) => {
     });
     /* Ensure the target database exists in ArangoDB */
     const dbInstance = await ensureDatabaseExists(sysDb, sourceConfig);
+
     // Create collections in parallel for performance
     const docColls = {};
     await Promise.all(tableNames.map(async (table) => {
@@ -94,8 +99,10 @@ const migrate = async ({ sourceType, sourceConfig }) => {
         logger.log({ level: 'info', message: `Collection created: ${table}` });
       } catch (err) {
         if (err.errorNum !== 1207) { // 1207: duplicate name
-          logger.log({ level: 'error', 
-            message: `Failed to create collection: ${table}`, meta: { error: err.message } });
+          logger.log({
+            level: 'error',
+            message: `Failed to create collection: ${table}`, meta: { error: err.message }
+          });
           throw err;
         }
         logger.log({ level: 'info', message: `${err.message} ${table}` });
@@ -106,22 +113,26 @@ const migrate = async ({ sourceType, sourceConfig }) => {
     // Create hash indexes in parallel, skip system fields
     await Promise.all(tableNames.map(async (table) => {
       if (!indexes[table]) 
-      {return;}
+      { return; }
       const coll = docColls[table];
       await Promise.all(Object.entries(indexes[table]).map(async ([indexName, idx]) => {
         if (indexName === 'PRIMARY') 
-        {return;}
+        { return; }
         const fields = idx.columns.filter(f => !['_key', '_id', '_rev'].includes(f));
         if (!fields.length) 
-        {return;}
+        { return; }
         try {
           await coll.ensureIndex({ type: 'hash', fields, unique: idx.unique });
-          logger.log({ level: 'info', 
-            message: `Hash index created on ${table}: [${fields.join(', ')}]` });
+          logger.log({
+            level: 'info',
+            message: `Hash index created on ${table}: [${fields.join(', ')}]`
+          });
         } catch (err) {
           if (err.errorNum !== 1210) { // 1210: duplicate index
-            logger.log({ level: 'error', 
-              message: `Failed to create index on ${table}`, meta: { error: err.message } });
+            logger.log({
+              level: 'error',
+              message: `Failed to create index on ${table}`, meta: { error: err.message }
+            });
             throw err;
           }
         }
@@ -130,7 +141,7 @@ const migrate = async ({ sourceType, sourceConfig }) => {
 
     // Migrate data in batches, log progress
     for (const table of tableNames) {
-      const rows = await adapter.fetchTableData(conn, table);
+      const rows = await sqlAdapter.fetchTableData(conn, table, sourceType);
       const pk = primaryKeys[table];
       const docs = rows.map(row => {
         const copy = { ...row };
@@ -138,17 +149,25 @@ const migrate = async ({ sourceType, sourceConfig }) => {
         delete copy[pk];
         return copy;
       });
+
+      // Truncate the collection before importing batches
+      await docColls[table].truncate();
+
       await processInBatches(docs, 1000, 5, async batch => {
         try {
-          await docColls[table].import(batch, { overwrite: true });
+          await docColls[table].import(batch);
         } catch (err) {
-          logger.log({ level: 'error', 
-            message: `Failed to import batch for ${table}`, meta: { error: err.message } });
+          logger.log({
+            level: 'error',
+            message: `Failed to import batch for ${table}`, meta: { error: err.message }
+          });
           throw err;
         }
       });
-      logger.log({ level: 'info', 
-        message: `Data migrated for table: ${table}`, meta: { count: docs.length } });
+      logger.log({
+        level: 'info',
+        message: `Data migrated for table: ${table}`, meta: { count: docs.length }
+      });
     }
 
     // Create edge collections and migrate edges in parallel for performance
@@ -159,36 +178,46 @@ const migrate = async ({ sourceType, sourceConfig }) => {
         logger.log({ level: 'info', message: `Edge collection created: ${edgeName}` });
       } catch (err) {
         if (err.errorNum !== 1207) { // 1207: duplicate name
-          logger.log({ level: 'error', 
-            message: `Failed to create edge collection: ${edgeName}`, 
-            meta: { error: err.message } });
+          logger.log({
+            level: 'error',
+            message: `Failed to create edge collection: ${edgeName}`,
+            meta: { error: err.message }
+          });
           throw err;
         }
         logger.log({ level: 'info', message: `${err.message} ${edgeName}` });
       }
       const edgeColl = dbInstance.collection(edgeName);
-      const rows = await adapter.fetchTableData(conn, fk.fromTable);
+      const rows = await sqlAdapter.fetchTableData(conn, fk.fromTable, sourceType);
       const edges = rows.map(r => {
         const fromKey = String(r[primaryKeys[fk.fromTable]]);
         const toKey = String(r[fk.fromColumn]);
         if (!toKey) 
-        {return null;}
+        { return null; }
         return { _from: `${fk.fromTable}/${fromKey}`, _to: `${fk.toTable}/${toKey}` };
       }).filter(Boolean);
+
+      // Truncate the edge collection before importing batches
+      await edgeColl.truncate();
+
       await processInBatches(edges, 1000, 5, async batch => {
         try {
-          await edgeColl.import(batch, { overwrite: true });
+          await edgeColl.import(batch);
         } catch (err) {
-          logger.log({ level: 'error', 
-            message: `Failed to import edge batch for ${edgeName}`, meta: { error: err.message } });
+          logger.log({
+            level: 'error',
+            message: `Failed to import edge batch for ${edgeName}`, meta: { error: err.message }
+          });
           throw err;
         }
       });
-      logger.log({ level: 'info', 
-        message: `Edges migrated for: ${edgeName}`, meta: { count: edges.length } });
+      logger.log({
+        level: 'info',
+        message: `Edges migrated for: ${edgeName}`, meta: { count: edges.length }
+      });
     }));
 
-    await adapter.disconnect(conn);
+    await sqlAdapter.disconnect(conn);
     logger.log({ level: 'info', message: 'Migration completed successfully.' });
   } catch (error) {
     logger.log({
@@ -197,7 +226,7 @@ const migrate = async ({ sourceType, sourceConfig }) => {
       meta: { message: error.message, stack: error.stack }
     });
     if (conn) 
-    {await adapters[sourceType].disconnect(conn);}
+    { await sqlAdapter.disconnect(conn); }
     throw error;
   }
 };

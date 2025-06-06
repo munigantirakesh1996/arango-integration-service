@@ -30,7 +30,7 @@ const config = {
   queue: {
     name: process.env.QUEUE_NAME,
     hostId: process.env.QUEUE_HOST_ID,
-  },
+  }
 };
 
 module.exports = config;

@@ -21,15 +21,30 @@ const validateBookingDetails = (bookingDetails) => joi.object({
   passengerEmail: joi.string().email().required()
 }).validate(bookingDetails);
 
-const validateDataSourceParams = (dataSourceParams) => joi.object({
-  sourceType: joi.string().required(),
-  sourceConfig: joi.object({
+const validateDataSourceParams = (dataSourceParams) => {
+  const baseSchema = {
     host: joi.string().required(),
     user: joi.string().required(),
     password: joi.string().required(),
-    database: joi.string().required()
-  }).required()
-}).validate(dataSourceParams);
+    database: joi.string().required(),
+    port: joi.number().integer().required(),
+  };
+
+  // If sourceType is 'postgres', schema is required; otherwise, it's optional
+  const schema = joi.object({
+    sourceType: joi.string().required(),
+    sourceConfig: joi.object({
+      ...baseSchema,
+      schema: joi.when('...sourceType', {
+        is: 'postgres',
+        then: joi.string().required(),
+        otherwise: joi.string().optional()
+      })
+    }).required()
+  });
+
+  return schema.validate(dataSourceParams);
+};
 
 module.exports = {
   validateId,
