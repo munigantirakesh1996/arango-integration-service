@@ -1,3 +1,4 @@
+// eslint-disable-next-line node/no-extraneous-require
 const { eachLimit } = require('async');
 
 const processInBatches = async (items, batchSize, concurrency, processor) => {
@@ -9,6 +10,6 @@ const processInBatches = async (items, batchSize, concurrency, processor) => {
   await eachLimit(batches, concurrency, async (batch) => {
     await processor(batch);
   });
-}
+};
 
 module.exports = { processInBatches };

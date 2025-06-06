@@ -21,7 +21,18 @@ const validateBookingDetails = (bookingDetails) => joi.object({
   passengerEmail: joi.string().email().required()
 }).validate(bookingDetails);
 
+const validateDataSourceParams = (dataSourceParams) => joi.object({
+  sourceType: joi.string().required(),
+  sourceConfig: joi.object({
+    host: joi.string().required(),
+    user: joi.string().required(),
+    password: joi.string().required(),
+    database: joi.string().required()
+  }).required()
+}).validate(dataSourceParams);
+
 module.exports = {
   validateId,
-  validateBookingDetails
+  validateBookingDetails,
+  validateDataSourceParams
 };

@@ -1,12 +1,10 @@
 const mysql = require('mysql2/promise');
 
-const connect = async (config) => {
-  return mysql.createConnection(config);
-}
+const connect = async (config) => mysql.createConnection(config);
 
 const fetchMetadata = async (conn, dbName) => {
   const [tables] = await conn.execute(
-    `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?`, [dbName]
+    'SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?', [dbName]
   );
   const tableNames = tables.map(t => t.TABLE_NAME);
   const primaryKeys = {};
@@ -17,7 +15,7 @@ const fetchMetadata = async (conn, dbName) => {
     const [pkRes] = await conn.execute(`
       SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'`,
-      [dbName, table]
+    [dbName, table]
     );
     primaryKeys[table] = pkRes[0]?.COLUMN_NAME || '_id';
 
@@ -25,7 +23,7 @@ const fetchMetadata = async (conn, dbName) => {
       SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
       FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL`,
-      [dbName, table]
+    [dbName, table]
     );
     fkRes.forEach(fk => {
       foreignKeys.push({
@@ -56,15 +54,15 @@ const fetchMetadata = async (conn, dbName) => {
   }
 
   return { tableNames, primaryKeys, foreignKeys, indexes };
-}
+};
 
 const fetchTableData = async (conn, tableName) => {
   const [rows] = await conn.execute(`SELECT * FROM ${tableName}`);
   return rows;
-}
+};
 
 const disconnect = async (conn) => {
   await conn.end();
-}
+};
 
 module.exports = { connect, fetchMetadata, fetchTableData, disconnect };

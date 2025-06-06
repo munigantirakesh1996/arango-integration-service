@@ -1,81 +1,134 @@
 const adapters = require('../adapters/index');
-const arango = require('../database/database');
 const { processInBatches } = require('../utils/batchProcessor');
 const { Database } = require('arangojs');
 const config = require('../config');
+const { system } = config.arango;
+const { logger } = require('../middlewares/loggerMiddleware');
+const { sourceTypes } = require('../utils/constants');
+
+const validateSourceType = (sourceType, adapter) => {
+  if (!sourceTypes.includes(sourceType) || !adapter) {
+    logger.log({
+      level: 'error',
+      message: 'migrationService - validateSourceType - error',
+      meta: {
+        message: `Invalid sourceType: 
+        ${sourceType}. Supported types are: ${sourceTypes.join(', ')}`
+      }
+    });
+    const badRequest = new Error(`Invalid sourceType: 
+      ${sourceType}. Supported types are: ${sourceTypes.join(', ')}`);
+    badRequest.status = 400;
+    throw badRequest;
+  }
+};
+
+const ensureDatabaseExists = async (sysDb, sourceConfig) => {
+  const { user, password, database: dbName } = sourceConfig;
+  const dbList = await sysDb.listDatabases();
+
+  if (!dbList.includes(dbName)) {
+    await sysDb.createDatabase(dbName, [{
+      username: user, // or any username you want to grant access
+      passwd: password,
+      active: true
+    }
+    ]);
+    // Optionally, grant permissions to a user (if needed)
+    // await sysDb.grantDatabaseAccess(dbName, dbConfig.username);
+    logger.log({
+      level: 'info',
+      message: 'migrationService - ensureDatabaseExists - database created',
+      meta: { dbName }
+    });
+  } else {
+    logger.log({
+      level: 'info',
+      message: 'migrationService - ensureDatabaseExists - database already exists',
+      meta: { dbName }
+    });
+  }
+  return new Database({
+    url: system.url,
+    databaseName: dbName,
+    auth: {
+      username: user,
+      password,
+    }
+  });
+};
 
 const migrate = async ({ sourceType, sourceConfig }) => {
+  let conn;
   try {
     const adapter = adapters[sourceType];
-    if (!adapter) throw new Error(`Unsupported sourceType: ${sourceType}`);
-
-    const conn = await adapter.connect(sourceConfig);
-
-    const { tableNames, primaryKeys, foreignKeys, indexes } = await adapter.fetchMetadata(conn, sourceConfig.database || sourceConfig.dbName);
-
-    console.log({ tableNames, primaryKeys, foreignKeys, indexes })
-    // --- Create database in ArangoDB if it doesn't exist ---
-    const dbName = sourceConfig.database;
-    const sysDb = new Database(
-      {
-        url: config.arango.url,
-        databaseName: config.arango.database,
-        auth: {
-          username: config.arango.username,
-          password: config.arango.password,
-        }
+    /* Validate the source type and adapter */
+    validateSourceType(sourceType, adapter);
+    conn = await adapter.connect(sourceConfig);
+    /* Log the Source db details */
+    const { tableNames, primaryKeys, foreignKeys, indexes } =
+      await adapter.fetchMetadata(conn, sourceConfig.database);
+    logger.log({
+      level: 'info',
+      message: 'migrationService - migrate - metadata fetched',
+      meta: { tableNames, primaryKeys, foreignKeys, indexes }
+    });
+    /* Create a connection to the system database in ArangoDB
+     * This is usually "_system" database where we can create new databases */
+    const sysDb = new Database({
+      url: system.url,
+      databaseName: system.database,
+      auth: {
+        username: system.username,
+        password: system.password,
       }
-
-    ); // Use system DB connection
-    const dbList = await sysDb.listDatabases();
-
-    console.log('Available databases:', dbList);
-
-    let dbInstance;
-    if (dbList.includes(dbName)) {
-      console.log('Database exists:', dbName);
-      dbInstance = new Database({
-        url: config.arango.url,
-        databaseName: dbName,
-        auth: {
-          username: config.arango.username,
-          password: config.arango.password,
-        }
-      });
-    } else {
-      await sysDb.createDatabase(dbName);
-      // Optionally, grant permissions to a user (if needed)
-      // await sysDb.grantDatabaseAccess(dbName, 'your-username');
-      console.log('Database created:', dbName);
-      dbInstance = new Database({
-        url: config.arango.url,
-        databaseName: dbName,
-        auth: {
-          username: config.arango.username,
-          password: config.arango.password,
-        }
-      });
-    }
-
+    });
+    /* Ensure the target database exists in ArangoDB */
+    const dbInstance = await ensureDatabaseExists(sysDb, sourceConfig);
+    // Create collections in parallel for performance
     const docColls = {};
-    for (const table of tableNames) {
+    await Promise.all(tableNames.map(async (table) => {
       const coll = dbInstance.collection(table);
-      await coll.create().catch(() => { });
-      docColls[table] = coll;
-    }
-
-    // Create hash indexes in ArangoDB based on RDBMS indexes
-    for (const table of tableNames) {
-      if (!indexes[table]) continue;
-      const coll = docColls[table];
-      for (const [indexName, idx] of Object.entries(indexes[table])) {
-        // Skip primary index (already exists in ArangoDB)
-        if (indexName === 'PRIMARY') continue;
-        // Create hash index, set unique if the RDBMS index is unique
-        await coll.ensureIndex({ type: 'hash', fields: idx.columns, unique: idx.unique }).catch(() => { });
+      try {
+        await coll.create();
+        logger.log({ level: 'info', message: `Collection created: ${table}` });
+      } catch (err) {
+        if (err.errorNum !== 1207) { // 1207: duplicate name
+          logger.log({ level: 'error', 
+            message: `Failed to create collection: ${table}`, meta: { error: err.message } });
+          throw err;
+        }
+        logger.log({ level: 'info', message: `${err.message} ${table}` });
       }
-    }
+      docColls[table] = coll;
+    }));
 
+    // Create hash indexes in parallel, skip system fields
+    await Promise.all(tableNames.map(async (table) => {
+      if (!indexes[table]) 
+      {return;}
+      const coll = docColls[table];
+      await Promise.all(Object.entries(indexes[table]).map(async ([indexName, idx]) => {
+        if (indexName === 'PRIMARY') 
+        {return;}
+        const fields = idx.columns.filter(f => !['_key', '_id', '_rev'].includes(f));
+        if (!fields.length) 
+        {return;}
+        try {
+          await coll.ensureIndex({ type: 'hash', fields, unique: idx.unique });
+          logger.log({ level: 'info', 
+            message: `Hash index created on ${table}: [${fields.join(', ')}]` });
+        } catch (err) {
+          if (err.errorNum !== 1210) { // 1210: duplicate index
+            logger.log({ level: 'error', 
+              message: `Failed to create index on ${table}`, meta: { error: err.message } });
+            throw err;
+          }
+        }
+      }));
+    }));
+
+    // Migrate data in batches, log progress
     for (const table of tableNames) {
       const rows = await adapter.fetchTableData(conn, table);
       const pk = primaryKeys[table];
@@ -86,34 +139,67 @@ const migrate = async ({ sourceType, sourceConfig }) => {
         return copy;
       });
       await processInBatches(docs, 1000, 5, async batch => {
-        await docColls[table].import(batch, { overwrite: true });
+        try {
+          await docColls[table].import(batch, { overwrite: true });
+        } catch (err) {
+          logger.log({ level: 'error', 
+            message: `Failed to import batch for ${table}`, meta: { error: err.message } });
+          throw err;
+        }
       });
+      logger.log({ level: 'info', 
+        message: `Data migrated for table: ${table}`, meta: { count: docs.length } });
     }
 
-    for (const fk of foreignKeys) {
+    // Create edge collections and migrate edges in parallel for performance
+    await Promise.all(foreignKeys.map(async (fk) => {
       const edgeName = `${fk.fromTable}_to_${fk.toTable}`;
-      await dbInstance.createEdgeCollection(edgeName).catch(() => { });
-      // Always get the collection object
+      try {
+        await dbInstance.createEdgeCollection(edgeName);
+        logger.log({ level: 'info', message: `Edge collection created: ${edgeName}` });
+      } catch (err) {
+        if (err.errorNum !== 1207) { // 1207: duplicate name
+          logger.log({ level: 'error', 
+            message: `Failed to create edge collection: ${edgeName}`, 
+            meta: { error: err.message } });
+          throw err;
+        }
+        logger.log({ level: 'info', message: `${err.message} ${edgeName}` });
+      }
       const edgeColl = dbInstance.collection(edgeName);
-
       const rows = await adapter.fetchTableData(conn, fk.fromTable);
       const edges = rows.map(r => {
         const fromKey = String(r[primaryKeys[fk.fromTable]]);
         const toKey = String(r[fk.fromColumn]);
-        if (!toKey) return null;
+        if (!toKey) 
+        {return null;}
         return { _from: `${fk.fromTable}/${fromKey}`, _to: `${fk.toTable}/${toKey}` };
-      }).filter(e => e);
-
+      }).filter(Boolean);
       await processInBatches(edges, 1000, 5, async batch => {
-        await edgeColl.import(batch, { overwrite: true });
+        try {
+          await edgeColl.import(batch, { overwrite: true });
+        } catch (err) {
+          logger.log({ level: 'error', 
+            message: `Failed to import edge batch for ${edgeName}`, meta: { error: err.message } });
+          throw err;
+        }
       });
-    }
+      logger.log({ level: 'info', 
+        message: `Edges migrated for: ${edgeName}`, meta: { count: edges.length } });
+    }));
 
     await adapter.disconnect(conn);
+    logger.log({ level: 'info', message: 'Migration completed successfully.' });
   } catch (error) {
-    console.error('Migration failed:', error);
+    logger.log({
+      level: 'error',
+      message: 'migrationService - migrate - error',
+      meta: { message: error.message, stack: error.stack }
+    });
+    if (conn) 
+    {await adapters[sourceType].disconnect(conn);}
     throw error;
   }
-}
+};
 
 module.exports = { migrate };

@@ -8,10 +8,18 @@ const config = {
   },
 
   arango: {
-    url: process.env.ARANGO_URL,
-    database: process.env.ARANGO_DB,
-    username: process.env.ARANGO_USER,
-    password: process.env.ARANGO_PASSWORD,
+    system: { // System database connection (usually "_system")
+      url: process.env.ARANGO_SYS_URL,
+      database: process.env.ARANGO_SYS_DB,
+      username: process.env.ARANGO_SYS_USER,
+      password: process.env.ARANGO_SYS_PASSWORD
+    },
+    app: { // Application (local) database connection
+      url: process.env.ARANGO_APP_URL,
+      database: process.env.ARANGO_APP_DB,
+      username: process.env.ARANGO_APP_USER,
+      password: process.env.ARANGO_APP_PASSWORD
+    }
   },
 
   redis: {
