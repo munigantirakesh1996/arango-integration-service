@@ -1,10 +1,12 @@
 const sqlAdapter = require('../adapters/sqlAdapter');
+const noSqlAdapter = require('../adapters/noSqlAdapter');
 const { processInBatches } = require('../utils/batchProcessor');
 const { Database } = require('arangojs');
 const config = require('../config');
 const { system } = config.arango;
 const { logger } = require('../middlewares/loggerMiddleware');
 const { sourceTypes } = require('../utils/constants');
+const regex = /^mongodb:\/\/([^:]+):([^@]+)@([^:]+):(\d+)$/;
 
 const validateSourceType = (sourceType) => {
   if (!sourceTypes.includes(sourceType)) {
@@ -58,13 +60,11 @@ const ensureDatabaseExists = async (sysDb, sourceConfig) => {
   });
 };
 
-const migrate = async (sourceDetails) => {
+const sqlMigration = async (sourceDetails) => {
   let conn;
   try {
     const { sourceType, sourceConfig } = sourceDetails;
     const { database, schema } = sourceConfig;
-    /* Validate the source type */
-    validateSourceType(sourceType);
 
     conn = await sqlAdapter.connect(sourceDetails);
 
@@ -73,7 +73,7 @@ const migrate = async (sourceDetails) => {
       await sqlAdapter.fetchMetadata(conn, database, schema, sourceType);
     logger.log({
       level: 'info',
-      message: 'migrationService - migrate - metadata fetched',
+      message: 'migrationService - sqlMigration - metadata fetched',
       meta: { tableNames, primaryKeys, foreignKeys, indexes }
     });
 
@@ -218,6 +218,191 @@ const migrate = async (sourceDetails) => {
     }));
 
     await sqlAdapter.disconnect(conn);
+  } catch (error) {
+    logger.log({
+      level: 'error',
+      message: 'migrationService - sqlMigration - error',
+      meta: { message: error.message, stack: error.stack }
+    });
+    if (conn) 
+    { await sqlAdapter.disconnect(conn); }
+    throw error;
+  }
+};
+
+const noSqlMigration = async (sourceDetails) => {
+  let conn;
+  try {
+    const { sourceConfig } = sourceDetails;
+    conn = await noSqlAdapter.connect(sourceDetails);
+
+    // Fetch collections and metadata
+    const { tableNames, primaryKeys, foreignKeys, indexes } = 
+    await noSqlAdapter.fetchMetadata(conn);
+    logger.log({
+      level: 'info',
+      message: 'migrationService - noSqlMigration - metadata fetched',
+      meta: { tableNames, primaryKeys, foreignKeys, indexes }
+    });
+
+    // Connect to system db in ArangoDB
+    const sysDb = new Database({
+      url: system.url,
+      databaseName: system.database,
+      auth: {
+        username: system.username,
+        password: system.password,
+      }
+    });
+    const url = sourceConfig.url;
+    const match = url.match(regex);
+
+    const user = match[1];
+    const password = match[2];
+    const dbInstance = await ensureDatabaseExists(sysDb, { user, password, ...sourceConfig });
+
+    // 1. Create collections in parallel
+    const docColls = {};
+    await Promise.all(tableNames.map(async (table) => {
+      const coll = dbInstance.collection(table);
+      try {
+        await coll.create();
+        logger.log({ level: 'info', message: `Collection created: ${table}` });
+      } catch (err) {
+        if (err.errorNum !== 1207) {
+          logger.log({
+            level: 'error',
+            message: `Failed to create collection: ${table}`,
+            meta: { error: err.message }
+          });
+          throw err;
+        }
+        logger.log({ level: 'info', message: `${err.message} ${table}` });
+      }
+      docColls[table] = coll;
+    }));
+
+    // 2. Create primary key and other indexes
+    await Promise.all(tableNames.map(async (table) => {
+      const coll = docColls[table];
+      // Primary key (_key) is always indexed in ArangoDB, so skip explicit PK index
+
+      // Create additional indexes
+      if (indexes[table]) {
+        await Promise.all(Object.values(indexes[table]).map(async (idx) => {
+          // Skip _id or _key as ArangoDB handles these
+          const fields = idx.columns.filter(f => !['_key', '_id', '_rev'].includes(f));
+          if (!fields.length) 
+          {return;}
+          try {
+            await coll.ensureIndex({ type: 'hash', fields, unique: idx.unique });
+            logger.log({
+              level: 'info',
+              message: `Hash index created on ${table}: [${fields.join(', ')}]`
+            });
+          } catch (err) {
+            if (err.errorNum !== 1210) { // 1210: duplicate index
+              logger.log({
+                level: 'error',
+                message: `Failed to create index on ${table}`,
+                meta: { error: err.message }
+              });
+              throw err;
+            }
+          }
+        }));
+      }
+    }));
+
+    // 3. Create edge collections for foreign keys (if any)
+    if (foreignKeys && foreignKeys.length > 0) {
+      await Promise.all(foreignKeys.map(async (fk) => {
+        const edgeName = `${fk.fromTable}_to_${fk.toTable}`;
+        try {
+          await dbInstance.createEdgeCollection(edgeName);
+          logger.log({ level: 'info', message: `Edge collection created: ${edgeName}` });
+        } catch (err) {
+          if (err.errorNum !== 1207) {
+            logger.log({
+              level: 'error',
+              message: `Failed to create edge collection: ${edgeName}`,
+              meta: { error: err.message }
+            });
+            throw err;
+          }
+          logger.log({ level: 'info', message: `${err.message} ${edgeName}` });
+        }
+      }));
+    }
+
+    // 4. Migrate data
+    for (const table of tableNames) {
+      const docs = await noSqlAdapter.fetchCollectionData(conn, table);
+
+      // Ensure _key format
+      const finalDocs = docs.map(doc => {
+        const cloned = { ...doc };
+        cloned._key = doc._id ? String(doc._id) : undefined;
+        delete cloned._id;
+        return cloned;
+      });
+
+      await docColls[table].truncate();
+
+      await processInBatches(finalDocs, 1000, 5, async (batch) => {
+        try {
+          await docColls[table].import(batch);
+        } catch (err) {
+          logger.log({
+            level: 'error',
+            message: `Failed to import batch for ${table}`,
+            meta: { error: err.message }
+          });
+          throw err;
+        }
+      });
+
+      logger.log({
+        level: 'info',
+        message: `Data migrated for collection: ${table}`,
+        meta: { count: finalDocs.length }
+      });
+    }
+
+    await noSqlAdapter.disconnect(conn);
+
+  } catch (error) {
+    logger.log({
+      level: 'error',
+      message: 'migrationService - noSqlMigration - error',
+      meta: { message: error.message, stack: error.stack }
+    });
+    if (conn) 
+    {await noSqlAdapter.disconnect(conn);}
+    throw error;
+  }
+};
+
+const migrate = async (sourceDetails) => {
+  try {
+    const { dbType, sourceType } = sourceDetails;
+    /* Validate the source type */
+    validateSourceType(sourceType);
+
+    if (dbType === 'sql') {
+      await sqlMigration(sourceDetails);
+    } else if (dbType === 'nosql') {
+      await noSqlMigration(sourceDetails);
+    } else {
+      logger.log({
+        level: 'error',
+        message: 'migrationService - migrate - error',
+        meta: { message: `Invalid dbType: ${dbType}` }
+      });
+      const badRequest = new Error(`Invalid dbType: ${dbType}`);
+      badRequest.status = 400;
+      throw badRequest;
+    }
     logger.log({ level: 'info', message: 'Migration completed successfully.' });
   } catch (error) {
     logger.log({
@@ -225,8 +410,6 @@ const migrate = async (sourceDetails) => {
       message: 'migrationService - migrate - error',
       meta: { message: error.message, stack: error.stack }
     });
-    if (conn) 
-    { await sqlAdapter.disconnect(conn); }
     throw error;
   }
 };

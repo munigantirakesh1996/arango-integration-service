@@ -1,5 +1,5 @@
 const { connectToDatabase } = require('./dbConnections');
-
+const { logger } = require('../middlewares/loggerMiddleware');
 const connect = async (config) => await connectToDatabase(config);
 
 const fetchMySQLMetadata = async (conn, dbName) => {
@@ -168,6 +168,10 @@ const fetchTableData = async (conn, tableName, type) => {
 
 const disconnect = async (conn) => {
   await conn.end();
+  logger.log({
+    level: 'info',
+    message: 'Connection closed'
+  });
 };
 
 module.exports = { connect, fetchMetadata, fetchTableData, disconnect };

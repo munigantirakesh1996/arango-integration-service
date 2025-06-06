@@ -30,17 +30,41 @@ const validateDataSourceParams = (dataSourceParams) => {
     port: joi.number().integer().required(),
   };
 
-  // If sourceType is 'postgres', schema is required; otherwise, it's optional
   const schema = joi.object({
-    sourceType: joi.string().required(),
-    sourceConfig: joi.object({
-      ...baseSchema,
-      schema: joi.when('...sourceType', {
-        is: 'postgres',
-        then: joi.string().required(),
-        otherwise: joi.string().optional()
-      })
-    }).required()
+    dbType: joi.string().valid('sql', 'nosql').required(),
+    sourceType: joi.string().valid('mysql', 'postgres', 'mongodb').required(),
+    sourceConfig: joi.when('sourceType', {
+      switch: [
+        {
+          is: 'mongodb',
+          then: joi.object({
+            url: joi.string().regex(/^mongodb:\/\/([^:]+):([^@]+)@([^:]+):(\d+)$/)
+              .messages({
+                'string.pattern.base': 
+                `Invalid MongoDB URL format. 
+                Expected format: mongodb://<user>:<password>@<host>:<port>`,
+                'any.required': 'MongoDB URL is required',
+              }).required(),
+            database: joi.string().required()
+          }).required()
+        },
+        {
+          is: 'postgres',
+          then: joi.object({
+            ...baseSchema,
+            schema: joi.string().required()
+          }).required()
+        },
+        {
+          is: 'mysql',
+          then: joi.object({
+            ...baseSchema,
+            schema: joi.string().optional()
+          }).required()
+        }
+      ],
+      otherwise: joi.forbidden()
+    })
   });
 
   return schema.validate(dataSourceParams);
