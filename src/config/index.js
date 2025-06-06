@@ -30,7 +30,16 @@ const config = {
   queue: {
     name: process.env.QUEUE_NAME,
     hostId: process.env.QUEUE_HOST_ID,
-  }
+  },
+
+  splunk: {
+    token: process.env.SPLUNK_HEC_TOKEN,
+    url: process.env.SPLUNK_HEC_URL,
+    index: process.env.SPLUNK_INDEX,
+    source: process.env.SPLUNK_SOURCE,
+    sourcetype: process.env.SPLUNK_SOURCETYPE,
+    level: process.env.SPLUNK_LOG_LEVEL,
+  },
 };
 
 module.exports = config;

@@ -1,6 +1,13 @@
 const winston = require('winston');
+const createSplunkTransport = require('../services/clients/splunkTransport');
 
-// Winston logger configuration
+const transports = [new winston.transports.Console()];
+// Add Splunk transport if available
+const splunkTransport = createSplunkTransport();
+if (splunkTransport) {
+  transports.push(splunkTransport);
+}
+// Create logger
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -8,12 +15,18 @@ const logger = winston.createLogger({
     winston.format.errors({ stack: true }),
     winston.format.json()
   ),
-  transports: [
-    new winston.transports.Console(),
-    // You can add file transports here if needed
-    // new winston.transports.File({ filename: 'logs/app.log' })
-  ],
+  transports,
 });
+
+// Catch unhandled Winston-level errors too
+logger.on('error', (err) => {
+  console.log({
+    level: 'error',
+    message: 'Winston Logger Error',
+    meta: { error: err.message }
+  });
+});
+
 
 // Express middleware for logging requests
 const reqLoggerMiddleware = (req, res, next) => {
@@ -25,7 +38,7 @@ const reqLoggerMiddleware = (req, res, next) => {
       url: req.originalUrl,
       ip: req.ip,
       userAgent: req.get('User-Agent'),
-    }
+    },
   });
   next();
 };
