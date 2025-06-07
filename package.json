@@ -30,6 +30,7 @@
     "mongodb": "^6.17.0",
     "mysql2": "^3.14.1",
     "pg": "^8.16.0",
+    "pg-cursor": "^2.15.0",
     "winston": "^3.17.0",
     "winston-splunk-httplogger": "^3.1.8"
   },

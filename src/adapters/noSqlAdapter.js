@@ -37,6 +37,22 @@ const fetchMetadata = async (db) => {
 const fetchCollectionData = async (db, collectionName) => 
   await db.collection(collectionName).find().toArray();
 
+const streamCollectionDataInBatches = async (db, collectionName, batchSize, onBatch) => {
+  const cursor = db.collection(collectionName).find();
+  let batch = [];
+  while (await cursor.hasNext()) {
+    const doc = await cursor.next();
+    batch.push(doc);
+    if (batch.length >= batchSize) {
+      await onBatch(batch);
+      batch = [];
+    }
+  }
+  if (batch.length > 0) {
+    await onBatch(batch);
+  }
+};
+
 const disconnect = async (db) => {
   if (db && db.client) {
     await db.client.close();
@@ -47,4 +63,6 @@ const disconnect = async (db) => {
   }
 };
 
-module.exports = { connect, fetchMetadata, fetchCollectionData, disconnect };
+module.exports = { 
+  connect, fetchMetadata, fetchCollectionData, disconnect, 
+  streamCollectionDataInBatches };

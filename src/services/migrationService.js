@@ -1,6 +1,5 @@
 const sqlAdapter = require('../adapters/sqlAdapter');
 const noSqlAdapter = require('../adapters/noSqlAdapter');
-const { processInBatches } = require('../utils/batchProcessor');
 const { Database } = require('arangojs');
 const config = require('../config');
 const { system } = config.arango;
@@ -139,23 +138,22 @@ const sqlMigration = async (sourceDetails) => {
       }));
     }));
 
-    // Migrate data in batches, log progress
+    // Migrate data in batches, log progress (streaming, memory efficient)
     for (const table of tableNames) {
-      const rows = await sqlAdapter.fetchTableData(conn, table, sourceType);
       const pk = primaryKeys[table];
-      const docs = rows.map(row => {
-        const copy = { ...row };
-        copy._key = String(copy[pk]);
-        delete copy[pk];
-        return copy;
-      });
-
-      // Truncate the collection before importing batches
-      await docColls[table].truncate();
-
-      await processInBatches(docs, 1000, 5, async batch => {
+      const coll = docColls[table];
+      await coll.truncate();
+      let totalCount = 0;
+      await sqlAdapter.streamTableDataInBatches(conn, table, sourceType, 1000, async (rows) => {
+        const docs = rows.map(row => {
+          const copy = { ...row };
+          copy._key = String(copy[pk]);
+          delete copy[pk];
+          return copy;
+        });
         try {
-          await docColls[table].import(batch);
+          await coll.import(docs);
+          totalCount += docs.length;
         } catch (err) {
           logger.log({
             level: 'error',
@@ -166,7 +164,8 @@ const sqlMigration = async (sourceDetails) => {
       });
       logger.log({
         level: 'info',
-        message: `Data migrated for table: ${table}`, meta: { count: docs.length }
+        message: `Data migrated for table: ${table}`,
+        meta: { count: totalCount }
       });
     }
 
@@ -188,32 +187,33 @@ const sqlMigration = async (sourceDetails) => {
         logger.log({ level: 'info', message: `${err.message} ${edgeName}` });
       }
       const edgeColl = dbInstance.collection(edgeName);
-      const rows = await sqlAdapter.fetchTableData(conn, fk.fromTable, sourceType);
-      const edges = rows.map(r => {
-        const fromKey = String(r[primaryKeys[fk.fromTable]]);
-        const toKey = String(r[fk.fromColumn]);
-        if (!toKey) 
-        { return null; }
-        return { _from: `${fk.fromTable}/${fromKey}`, _to: `${fk.toTable}/${toKey}` };
-      }).filter(Boolean);
-
-      // Truncate the edge collection before importing batches
       await edgeColl.truncate();
-
-      await processInBatches(edges, 1000, 5, async batch => {
-        try {
-          await edgeColl.import(batch);
-        } catch (err) {
-          logger.log({
-            level: 'error',
-            message: `Failed to import edge batch for ${edgeName}`, meta: { error: err.message }
-          });
-          throw err;
-        }
-      });
+      let totalEdges = 0;
+      await sqlAdapter.streamTableDataInBatches(conn, fk.fromTable, sourceType, 1000, 
+        async (rows) => {
+          const edges = rows.map(r => {
+            const fromKey = String(r[primaryKeys[fk.fromTable]]);
+            const toKey = String(r[fk.fromColumn]);
+            if (!toKey) 
+            {return null;}
+            return { _from: `${fk.fromTable}/${fromKey}`, _to: `${fk.toTable}/${toKey}` };
+          }).filter(Boolean);
+          try {
+            await edgeColl.import(edges);
+            totalEdges += edges.length;
+          } catch (err) {
+            logger.log({
+              level: 'error',
+              message: `Failed to import edge batch for ${edgeName}`,
+              meta: { error: err.message }
+            });
+            throw err;
+          }
+        });
       logger.log({
         level: 'info',
-        message: `Edges migrated for: ${edgeName}`, meta: { count: edges.length }
+        message: `Edges migrated for: ${edgeName}`,
+        meta: { count: totalEdges }
       });
     }));
 
@@ -337,21 +337,18 @@ const noSqlMigration = async (sourceDetails) => {
 
     // 4. Migrate data
     for (const table of tableNames) {
-      const docs = await noSqlAdapter.fetchCollectionData(conn, table);
-
-      // Ensure _key format
-      const finalDocs = docs.map(doc => {
-        const cloned = { ...doc };
-        cloned._key = doc._id ? String(doc._id) : undefined;
-        delete cloned._id;
-        return cloned;
-      });
-
       await docColls[table].truncate();
-
-      await processInBatches(finalDocs, 1000, 5, async (batch) => {
+      let totalCount = 0;
+      await noSqlAdapter.streamCollectionDataInBatches(conn, table, 1000, async (docs) => {
+        const finalDocs = docs.map(doc => {
+          const cloned = { ...doc };
+          cloned._key = doc._id ? String(doc._id) : undefined;
+          delete cloned._id;
+          return cloned;
+        });
         try {
-          await docColls[table].import(batch);
+          await docColls[table].import(finalDocs);
+          totalCount += finalDocs.length;
         } catch (err) {
           logger.log({
             level: 'error',
@@ -361,11 +358,10 @@ const noSqlMigration = async (sourceDetails) => {
           throw err;
         }
       });
-
       logger.log({
         level: 'info',
         message: `Data migrated for collection: ${table}`,
-        meta: { count: finalDocs.length }
+        meta: { count: totalCount }
       });
     }
 

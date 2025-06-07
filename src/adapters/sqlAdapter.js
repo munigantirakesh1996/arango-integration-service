@@ -166,6 +166,55 @@ const fetchTableData = async (conn, tableName, type) => {
   }
 };
 
+/**
+ * Streams table data in batches for MySQL and PostgreSQL.
+ * Calls onBatch(batch) for each batch of rows.
+ */
+
+const streamTableDataInBatches = async (conn, tableName, type, batchSize, onBatch) => {
+  if (type === 'mysql') {
+    // mysql2 query stream
+    const sql = `SELECT * FROM \`${tableName}\``;
+    const stream = conn.connection.query(sql).stream({ highWaterMark: batchSize });
+    let batch = [];
+    for await (const row of stream) {
+      batch.push(row);
+      if (batch.length >= batchSize) {
+        await onBatch(batch);
+        batch = [];
+      }
+    }
+    if (batch.length > 0) {
+      await onBatch(batch);
+    }
+  } else if (type === 'postgres') {
+    const Cursor = require('pg-cursor');
+    const sql = `SELECT * FROM "${tableName}"`;
+    const client = await conn.connect();
+    const cursor = client.query(new Cursor(sql));
+    let done = false;
+    while (!done) {
+      const rows = await new Promise((resolve, reject) => {
+        cursor.read(batchSize, (err, rows) => {
+          if (err) 
+          {return reject(err);}
+          resolve(rows);
+        });
+      });
+      if (rows.length === 0) {
+        done = true;
+      } else {
+        await onBatch(rows);
+        if (rows.length < batchSize) 
+        {done = true;}
+      }
+    }
+    cursor.close(() => client.release());
+  } else {
+    throw new Error(`Unsupported database type for streaming: ${type}`);
+  }
+};
+
 const disconnect = async (conn) => {
   await conn.end();
   logger.log({
@@ -174,4 +223,4 @@ const disconnect = async (conn) => {
   });
 };
 
-module.exports = { connect, fetchMetadata, fetchTableData, disconnect };
+module.exports = { connect, fetchMetadata, fetchTableData, disconnect, streamTableDataInBatches };
