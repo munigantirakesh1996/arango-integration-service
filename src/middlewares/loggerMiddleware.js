@@ -2,12 +2,15 @@ const winston = require('winston');
 const createSplunkTransport = require('../services/clients/splunkTransport');
 
 const transports = [new winston.transports.Console()];
+
 // Add Splunk transport if available
 const splunkTransport = createSplunkTransport();
 if (splunkTransport) {
   transports.push(splunkTransport);
 }
+
 // Create logger
+// Winston logger configuration
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -38,12 +41,12 @@ const reqLoggerMiddleware = (req, res, next) => {
       url: req.originalUrl,
       ip: req.ip,
       userAgent: req.get('User-Agent'),
-    },
+    }
   });
   next();
 };
 
 module.exports = {
   logger,
-  reqLoggerMiddleware,
+  reqLoggerMiddleware
 };

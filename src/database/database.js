@@ -7,7 +7,7 @@ const db = new Database({
   databaseName: app.database,
   auth: {
     username: app.username,
-    password: app.password,
+    password: app.password
   }    
 });
 

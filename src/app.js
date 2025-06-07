@@ -3,6 +3,7 @@ const { reqLoggerMiddleware } = require('./middlewares/loggerMiddleware');
 const errorMiddleware = require('./middlewares/errorMiddleware');
 const routes = require('./routes');
 const arena = require('./ui/arena');
+
 const app = express();
 
 app.use(reqLoggerMiddleware);
